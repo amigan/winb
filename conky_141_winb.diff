@@ -1,0 +1,340 @@
+diff -ru conky-1.4.1-old/src/conky.c conky-1.4.1/src/conky.c
+--- conky-1.4.1-old/src/conky.c	Thu May 11 17:05:02 2006
++++ conky-1.4.1/src/conky.c	Thu May 11 17:05:44 2006
+@@ -64,6 +64,10 @@
+ static int selected_font = 0;
+ static int font_count = -1;
+ struct font_list *fonts = NULL;
++struct WBIO wbio;
++struct WBData wbdat;
++static short same_interval = 0;
++void init_mibs(void);
+ 
+ #ifdef XFT
+ 
+@@ -786,6 +790,7 @@
+ 	OBJ_offset,
+ 	OBJ_voffset,
+ 	OBJ_alignr,
++ 	OBJ_winb,
+ 	OBJ_alignc,
+ 	OBJ_i2c,
+ #if defined(__linux__)
+@@ -992,6 +997,10 @@
+ 			int        connection_index;  /* 0 to n-1 connections. */
+ 		} tcp_port_monitor;
+ #endif
++		struct {
++			struct WBIO *wbio;
++			int type;
++		} wb;
+ 	} data;
+ };
+ 
+@@ -1895,6 +1904,15 @@
+ 		(void) scan_bar(arg, &obj->data.pair.a, &obj->data.pair.b);
+ 	END OBJ(seti_credit, INFO_SETI) END
+ #endif
++	OBJ(winb, INFO_WINB)
++		char b1[64];
++		obj->data.wb.wbio = &wbio;
++		if(!arg) {
++			CRIT_ERR("winb needs arguments");
++		}
++		sscanf(arg, "%63s", b1);
++		obj->data.wb.type = winbond_get_type(b1);
++	END
+ #ifdef MPD
+ 		OBJ(mpd_artist, INFO_MPD)
+ 		END OBJ(mpd_title, INFO_MPD)
+@@ -2278,6 +2296,18 @@
+ 						get_freq_dynamic(p, p_max_size, "%'.2f", 1000); /* pk */
+ 					}
+ 				}
++				OBJ(winb) {
++					float r;
++					if(!same_interval) {
++						fill_wbdata(&wbdat);
++						same_interval = 1;
++					}
++					r = get_winbond_inf(obj->data.wb.type, &wbdat, obj->data.wb.wbio->fahr);
++					if(r > 100 || r == 0)
++						snprintf(p, p_max_size, "%d", (int)r);
++					else
++						snprintf(p, p_max_size, "%.1f", r);
++				}
+ 				OBJ(adt746xcpu) {
+ 					get_adt746x_cpu(p, p_max_size); /* pk */
+ 				}
+@@ -3504,6 +3534,8 @@
+ 
+ 	p = text_buffer;
+ 
++	same_interval = 0;
++
+ 	generate_text_internal(p, P_MAX_SIZE, text_objects, text_object_count, cur);
+ 
+ 	if (stuff_in_upper_case) {
+@@ -5045,6 +5077,10 @@
+ 				CONF_ERR;
+ 		}
+ #endif
++		CONF("winb_fahr") {
++			if(strcasecmp(value, "yes") == 0)
++				wbio.fahr = 1;
++		}
+ #ifdef MPD
+ 		CONF("mpd_host") {
+ 			if (value)
+@@ -5449,6 +5485,8 @@
+ 	struct sigaction act, oact;
+ 
+ 	g_signal_pending=0;
++	memset(&wbio, 0, sizeof(wbio));
++	init_mibs();
+ 	memset(&info, 0, sizeof(info) );
+ 
+ #ifdef TCP_PORT_MONITOR
+Only in conky-1.4.1/src: conky.c.orig
+diff -ru conky-1.4.1-old/src/conky.h conky-1.4.1/src/conky.h
+--- conky-1.4.1-old/src/conky.h	Thu May 11 17:05:02 2006
++++ conky-1.4.1/src/conky.h	Thu May 11 17:05:47 2006
+@@ -200,6 +200,7 @@
+ #ifdef BMPX
+ 	INFO_BMPX = 24,
+ #endif
++	INFO_WINB = 25,
+ };
+ 
+ 
+@@ -453,6 +454,11 @@
+ struct fs_stat *prepare_fs_stat(const char *path);
+ void clear_fs_stats(void);
+ 
++void fill_wbdata(struct WBData *wbd);
++float get_winbond_inf(int type, struct WBData *wbd, short fahr);
++int winbond_get_type(char *st);
++
++
+ /* in mixer.c */
+ 
+ int mixer_init(const char *);
+@@ -519,6 +525,32 @@
+ 
+ int get_mldonkey_status(mldonkey_config * config, mldonkey_info * info);
+ #endif
++enum wbsens {
++	WB_FAN1,
++	WB_FAN2,
++	WB_FAN3,
++	WB_TEMP1,
++	WB_TEMP2,
++	WB_TEMP3,
++	WB_VC0,
++	WB_VC1,
++	WB_V33,
++	WB_V50P,
++	WB_V50N,
++	WB_V12P,
++	WB_V12N
++};
++
++struct WBIO {
++	int fahr;
++};
++
++struct WBData {
++	float temp1, temp2, temp3;
++	int fan1, fan2, fan3;
++	float vc0, vc1, v33, v50p, v50n, v12p, v12n;
++};
++
+ 
+ /* in linux.c */
+ 
+Only in conky-1.4.1/src: conky.h.orig
+diff -ru conky-1.4.1-old/src/freebsd.c conky-1.4.1/src/freebsd.c
+--- conky-1.4.1-old/src/freebsd.c	Thu May 11 17:05:02 2006
++++ conky-1.4.1/src/freebsd.c	Thu May 11 17:05:49 2006
+@@ -753,6 +753,180 @@
+ 
+ #endif
+ 
++#define CM(a)	if(strcasecmp(st, #a) == 0) { return WB_ ## a; }
++#define VCM(a)	else if(strcasecmp(st, #a) == 0) { return WB_ ## a; }
++int winbond_get_type(st)
++	char *st;
++{
++	CM(FAN1)
++	VCM(FAN2)
++	VCM(FAN3)
++	VCM(TEMP1)
++	VCM(TEMP2)
++	VCM(TEMP3)
++	VCM(VC0)
++	VCM(VC1)
++	VCM(V33)
++	VCM(V50P)
++	VCM(V50N)
++	VCM(V12P)
++	VCM(V12N)
++	return 0;
++}
++
++float get_winbond_inf(type, wbd, fahr)
++	int type;
++	struct WBData *wbd;
++	short fahr;
++{
++	float trv;
++#define FAHR(x)	((x) * 1.8 + 32.0)
++	switch(type) {
++		case WB_FAN1:
++			trv = (float)wbd->fan1;
++			break;
++		case WB_FAN2:
++			trv = (float)wbd->fan2;
++			break;
++		case WB_FAN3:
++			trv = (float)wbd->fan3;
++			break;
++		case WB_TEMP1:
++			trv = wbd->temp1;
++			if(fahr)
++				trv = FAHR(trv);
++			break;
++		case WB_TEMP2:
++			trv = wbd->temp2;
++			if(fahr)
++				trv = FAHR(trv);
++			break;
++		case WB_TEMP3:
++			trv = wbd->temp3;
++			if(fahr)
++				trv = FAHR(trv);
++			break;
++		case WB_VC0:
++			trv = wbd->vc0;
++			break;
++		case WB_VC1:
++			trv = wbd->vc1;
++			break;
++		case WB_V33:
++			trv = wbd->v33;
++			break;
++		case WB_V50P:
++			trv = wbd->v50p;
++			break;
++		case WB_V50N:
++			trv = wbd->v50n;
++			break;
++		case WB_V12P:
++			trv = wbd->v12p;
++			break;
++		case WB_V12N:
++			trv = wbd->v12n;
++			break;
++		default:
++			trv = 0.0;
++	}
++
++	return trv;
++}
++#define TEMPFORM(n)	(float)(n & 0xff) + 0.5 * ((n & 0xFF00) >> 15)
++struct mibs {
++	int temps[2][3];
++	int fans[2][3];
++	int volts[6][3];
++} mibs;
++
++#define HWB "hw.winbond."
++void init_mibs(void)
++{
++	size_t ts = 3;
++	sysctlnametomib(HWB "temp1_up", mibs.temps[0], &ts);
++	sysctlnametomib(HWB "temp2_up", mibs.temps[1], &ts);
++	sysctlnametomib(HWB "temp3_up", mibs.temps[2], &ts);
++	sysctlnametomib(HWB "fan1", mibs.fans[0], &ts);
++	sysctlnametomib(HWB "fan2", mibs.fans[1], &ts);
++	sysctlnametomib(HWB "fan3", mibs.fans[2], &ts);
++	sysctlnametomib(HWB "vc0_up", mibs.volts[0], &ts);
++	sysctlnametomib(HWB "vc1_up", mibs.volts[1], &ts);
++	sysctlnametomib(HWB "v33_up", mibs.volts[2], &ts);
++	sysctlnametomib(HWB "v50p_up", mibs.volts[3], &ts);
++	sysctlnametomib(HWB "v12p_up", mibs.volts[4], &ts);
++	sysctlnametomib(HWB "v12n_up", mibs.volts[5], &ts);
++	sysctlnametomib(HWB "v50n_up", mibs.volts[6], &ts);
++}
++#define TL 3
++void getTemp(t1, t2, t3)
++	float *t1, *t2, *t3;
++{
++	int tv;
++	size_t sz = sizeof(tv);
++
++	sysctl(mibs.temps[0], TL, &tv, &sz, NULL, 0);
++	*t1 = TEMPFORM(tv);
++	sysctl(mibs.temps[1], TL, &tv, &sz, NULL, 0);
++	*t2 = TEMPFORM(tv);
++	sysctl(mibs.temps[2], TL, &tv, &sz, NULL, 0);
++	*t3 = TEMPFORM(tv);
++}
++
++void getFanSp(f1, f2, f3)
++	int *f1, *f2, *f3;
++{
++	int tv;
++	size_t sz = sizeof(tv);
++
++	sysctl(mibs.fans[0], TL, &tv, &sz, NULL, 0);
++	*f1 = tv;
++	sysctl(mibs.fans[1], TL, &tv, &sz, NULL, 0);
++	*f2 = tv;
++#if 0 /* doesn't work */
++	sysctl(mibs.fans[2], TL, &tv, &sz, NULL, 0);
++#endif
++	sysctlbyname("hw.winbond.fan3", &tv, &sz, NULL, 0);
++	*f3 = tv;
++}
++
++void getVolt(vc0, vc1, v33, v50p, v50n, v12p, v12n)
++	float *vc0, *vc1, *v33, *v50p, *v50n, *v12p, *v12n;
++{
++	int tv;
++	size_t sz = sizeof(tv);
++
++	sysctl(mibs.volts[0], TL, &tv, &sz, NULL, 0);
++	*vc0 = tv * 0.016;
++	sysctl(mibs.volts[1], TL, &tv, &sz, NULL, 0);
++	*vc1 = tv * 0.016;
++	sysctl(mibs.volts[2], TL, &tv, &sz, NULL, 0);
++	*v33 = tv * 0.016;
++	sysctl(mibs.volts[3], TL, &tv, &sz, NULL, 0);
++	*v50p = tv * 0.016 * 1.68;
++	sysctl(mibs.volts[4], TL, &tv, &sz, NULL, 0);
++	*v12p = tv * 0.016 * 3.800;
++	sysctl(mibs.volts[5], TL, &tv, &sz, NULL, 0);
++	*v12n = (tv * 0.016 - 3.6 * 0.8056) / 0.1944; /* different for w8371d */
++	sysctl(mibs.volts[6], TL, &tv, &sz, NULL, 0);
++	*v50n = (tv * 0.016 - 3.6 * 0.6818) / 0.3182;
++}
++
++void fill_wbdata(wbd)
++	struct WBData *wbd;
++{
++	getTemp(&wbd->temp1, &wbd->temp2, &wbd->temp3);
++
++/* get fan speeds */
++
++	getFanSp(&wbd->fan1, &wbd->fan2, &wbd->fan3);
++
++/* get voltages */
++
++	getVolt(&wbd->vc0, &wbd->vc1, &wbd->v33, &wbd->v50p, &wbd->v50n, &wbd->v12p, &wbd->v12n);
++}
++
++
+ /* empty stub so conky links */
+ void free_all_processes(void)
+ {
+Only in conky-1.4.1/src: freebsd.c.orig

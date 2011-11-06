@@ -1,0 +1,14 @@
+This is a FreeBSD kernel module to present winbond W837* series and similar hardware monitoring chip info
+as sysctl OIDs. Large portions were taken from mbmon, which is (C)1999-2004  Yoshifumi R. Shimizu.
+
+Type "make" to build the kernel module.
+
+The included patch is for conky-1.4.1. To use it, the ${winb} directive
+is used in .conkyrc. It takes one argument, the name of the sensor.
+These include:
+
+fan[123], temp[123], vc[01], v33, v50[pn], v12[pn]
+
+Have fun.
+-Dan <dcp1990@neptune.atopia.net>
+http://www.theamigan.net/
